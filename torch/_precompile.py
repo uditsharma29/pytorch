@@ -435,7 +435,8 @@ class DynamoTracer:
     whose dropped guards told captured variants apart or hang off a
     configuration-chosen slot (``require_no_risky_drops``). Other dropped guards,
     such as the identity guards every model drops because they cannot be serialized,
-    are listed in the artifact rather than refused.
+    are listed in the artifact rather than refused. ``fullgraph`` makes a graph break
+    an error, as ``torch.compile(fullgraph=True)`` does, so the capture is one graph.
     """
 
     guard_filter_fn: Callable[[Sequence[Any]], Sequence[bool]] | None = None
@@ -443,6 +444,7 @@ class DynamoTracer:
     dynamic: bool | None = None
     require_complete: bool = True
     require_no_risky_drops: bool = True
+    fullgraph: bool = False
 
 
 class PrecompiledRunnable:
@@ -3542,6 +3544,32 @@ def _read_artifact(
     return python_code, cache
 
 
+def _matching_cache(
+    python_code: str, cache_path: str | os.PathLike[str]
+) -> bytes | None:
+    """The cache at ``cache_path``, or None if it is missing or was captured with
+    other text than ``python_code`` (an artifact edited after capture: the cache's
+    code_hash covers the captured text). A cache that does not read as an envelope is
+    returned as is, for the loader to report as corrupt."""
+    try:
+        with open(cache_path, "rb") as f:
+            cache = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise PrecompileError(
+            f"precompile could not read the cache (cache_path={cache_path!r}): {e}"
+        ) from e
+    try:
+        blob = torch.load(io.BytesIO(cache), weights_only=True)
+    except Exception:
+        return cache
+    code_hash = hashlib.sha256(python_code.encode()).hexdigest()
+    if isinstance(blob, dict) and blob.get("code_hash") != code_hash:
+        return None
+    return cache
+
+
 def _verified_cache_envelope(
     cache: bytes,
     *,
@@ -3906,6 +3934,7 @@ def capture(
             guard_filter_fn=tracer.guard_filter_fn,
             recompile_limit=tracer.recompile_limit,
             dynamic=tracer.dynamic,
+            fullgraph=tracer.fullgraph,
         )
     except PackageError as e:
         raise PrecompileError(str(e)) from e
